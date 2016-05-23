@@ -1,0 +1,21 @@
+{application, 'gcm_xmpp',
+ [{description, "GCM XMPP play"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {'gcm_cmpp', []}},
+  {applications,
+    [
+      kernel,
+      stdlib,
+      ssl,
+      inets,
+      jiffy,
+      lager
+    ]},
+  {env,[]},
+  {modules, []},
+
+  {contributors, []},
+  {licenses, []},
+  {links, []}
+ ]}.
