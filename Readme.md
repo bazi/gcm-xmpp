@@ -3,7 +3,7 @@ Compile rebar project:
 
     ./rebar3 compile
 
-Set API key and sender ID values in https://github.com/bazi/gcm-xmpp/blob/master/apps/gcm/src/gcm_xmpp.erl definedas macros.
+Set API key and sender ID values in [this file](https://github.com/bazi/gcm-xmpp/blob/master/apps/gcm/src/gcm_xmpp.erl) which defined as macros.
 
 Run Erlang console with our compiled beam files:
 
