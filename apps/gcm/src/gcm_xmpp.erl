@@ -37,8 +37,17 @@
 -define(API_KEY, "api-key-here").
 -define(SENDER_ID, "sender-id-here").
 
+-define(STREAM_STANZA, <<"<stream:stream to='gcm.googleapis.com' version='1.0' xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams'>">>).
+
+-define(STEP_INIT, 0).
+-define(STEP_AUTH, 1).
+-define(STEP_STRM, 2).
+-define(STEP_BIND, 3).
+-define(STEP_DONE, 4).
+
 -record(state, {
-  socket
+  socket,
+  step
 }).
 
 
@@ -54,7 +63,7 @@ init([]) ->
   lager:start(),
   ssl:start(),
   Socket = ccs_connect(),
-  {ok, #state{socket = Socket}}.
+  {ok, #state{socket = Socket, step = ?STEP_INIT}}.
 
 
 send(Message, DeviceToken) ->
@@ -74,7 +83,7 @@ start(_Starttype, _StartArgs) ->
   start_link().
 
 stop(_State) ->
-  ok.
+  gen_server:cast(?SERVER, stop).
 
 
 handle_call(_Request, _From, State) ->
@@ -83,7 +92,9 @@ handle_call(_Request, _From, State) ->
 
 handle_cast({send, Message, DeviceToken}, State = #state{socket = Socket}) ->
   Message_id = message_id(),
-  Data = build_payload(Message_id, Message, "topic", DeviceToken),
+  BMessage = list_to_binary(Message),
+  BToken = list_to_binary(DeviceToken),
+  Data = build_payload(Message_id, BMessage, <<"topic">>, BToken),
   Stanza = make_stanza("", binary_to_list(Data)),
   case ssl:send(Socket, Stanza) of
     {error, closed} ->
@@ -102,18 +113,53 @@ handle_cast(_Request, State) ->
   {noreply, State}.
 
 
-handle_info(Info, State) ->
+handle_info(Info, State = #state{socket = Socket, step = Step}) ->
   case Info of
     {ssl, _, Data} ->
-      lager:info("GCM XMPP raw response:~n~p", [Data]);
+      lager:info("GCM XMPP raw response:~n~p", [Data]),
+      %% TODO: do better recognition of stanza - parse xml and check by xpath
+      IsPlainAuthOk = string:str(binary_to_list(Data), "PLAIN") > 0,
+      IsAuthSuccess = string:str(binary_to_list(Data), "success") > 0,
+      IsBindFeature = string:str(binary_to_list(Data), "bind") > 0,
+      IsBindSuccess = string:str(binary_to_list(Data), "jid") > 0,
+
+      NewState = if
+        Step =:= ?STEP_INIT, IsPlainAuthOk ->
+          ccs_auth(State);
+
+        Step =:= ?STEP_AUTH, IsAuthSuccess ->
+          %% if our authentication is successful, we have to send stream stanza
+          ssl:send(Socket, ?STREAM_STANZA),
+          State#state{step = ?STEP_STRM};
+
+        Step =:= ?STEP_STRM, IsBindFeature ->
+          %% in response to our stream stanza, we should receive iq stanza with bind feature, and so we send bind stanza
+          IqId = binary_to_list(message_id()),
+          BindStanza = "<iq type='set' id='" ++ IqId ++ "'><bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'></bind></iq>",
+          ssl:send(Socket, BindStanza),
+          State#state{step = ?STEP_BIND};
+
+        Step =:= ?STEP_BIND, IsBindSuccess ->
+          %% upon successful binding we receive jid (you can save it if needed) and we are done!
+          State#state{step = ?STEP_DONE};
+
+        true ->
+          State
+      end,
+      {noreply, NewState};
+
     {ssl_closed, Socket} ->
-      lager:error("GCM XMPP SSL socket closed: ~p", [Socket]);
+      lager:error("GCM XMPP SSL socket closed: ~p", [Socket]),
+      {stop, normal, State};
+
     {ssl_error, Socket, Reason} ->
-      lager:info("GCM XMPP SSL(~p) error: ~p", [Socket, Reason]);
+      lager:info("GCM XMPP SSL(~p) error: ~p", [Socket, Reason]),
+      {stop, normal, State};
+
     _ ->
-      lager:info("GCM XMPP unrecognized info: ~p", [Info])
-  end,
-  {noreply, State}.
+      lager:info("GCM XMPP unrecognized info: ~p", [Info]),
+      {stop, normal, State}
+  end.
 
 
 terminate(_Reason, #state{socket = Socket}) ->
@@ -133,20 +179,22 @@ ccs_connect() ->
 
   {ok, Socket} = ssl:connect("gcm-preprod.googleapis.com", 5236, []),
   ssl:setopts(Socket, [
-    {mode, binary},
-    {keepalive, true}
+    {mode, binary}
   ]),
 
-  Stream_xml = <<"<stream:stream to=\"gcm.googleapis.com\" version=\"1.0\" xmlns=\"jabber:client\" xmlns:stream=\"http://etherx.jabber.org/streams\">">>,
-  ssl:send(Socket, Stream_xml),
+  ssl:send(Socket, ?STREAM_STANZA),
+  Socket.
 
+
+ccs_auth(#state{socket = Socket} = State) ->
   %% make auth message as per PLAIN SALS specs
-  Sasl = ?SENDER_ID ++ [0] ++ ?SENDER_ID ++ [0] ++ ?API_KEY,
+  Sender = ?SENDER_ID ++ "@gcm.googleapis.com",
+  Sasl = Sender ++ [0] ++ Sender ++ [0] ++ ?API_KEY,
   Sasl_base64 = base64:encode_to_string(Sasl),
 
-  Auth_xml = "<auth mechanism=\"PLAIN\" xmlns=\"urn:ietf:params:xml:ns:xmpp-sasl\">" ++ Sasl_base64 ++ "</auth>",
+  Auth_xml = "<auth mechanism='PLAIN' xmlns='urn:ietf:params:xml:ns:xmpp-sasl'>" ++ Sasl_base64 ++ "</auth>",
   ssl:send(Socket, Auth_xml),
-  Socket.
+  State#state{step = ?STEP_AUTH}.
 
 
 -spec message_id() -> binary().
